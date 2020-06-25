@@ -112,6 +112,10 @@ test_expect_success 'git log -- multiple path specs does not use Bloom filters' 
 	test_bloom_filters_not_used "-- file4 A/file1"
 '
 
+test_expect_success 'git log -- "." pathspec at root does not use Bloom filters' '
+	test_bloom_filters_not_used "-- ."
+'
+
 test_expect_success 'git log with wildcard that resolves to a single path uses Bloom filters' '
 	test_bloom_filters_used "-- *4" &&
 	test_bloom_filters_used "-- *renamed"
@@ -126,7 +130,7 @@ test_expect_success 'setup - add commit-graph to the chain without Bloom filters
 	test_commit c14 A/anotherFile2 &&
 	test_commit c15 A/B/anotherFile2 &&
 	test_commit c16 A/B/C/anotherFile2 &&
-	GIT_TEST_COMMIT_GRAPH_CHANGED_PATHS=0 git commit-graph write --reachable --split &&
+	git commit-graph write --reachable --split --no-changed-paths &&
 	test_line_count = 2 .git/objects/info/commit-graphs/commit-graph-chain
 '
 
@@ -142,7 +146,7 @@ test_expect_success 'setup - add commit-graph to the chain with Bloom filters' '
 
 test_bloom_filters_used_when_some_filters_are_missing () {
 	log_args=$1
-	bloom_trace_prefix="statistics:{\"filter_not_present\":3,\"zero_length_filter\":0,\"maybe\":8,\"definitely_not\":6"
+	bloom_trace_prefix="statistics:{\"filter_not_present\":3,\"zero_length_filter\":0,\"maybe\":6,\"definitely_not\":8"
 	setup "$log_args" &&
 	grep -q "$bloom_trace_prefix" "$TRASH_DIRECTORY/trace.perf" &&
 	test_cmp log_wo_bloom log_w_bloom
@@ -150,6 +154,33 @@ test_bloom_filters_used_when_some_filters_are_missing () {
 
 test_expect_success 'Use Bloom filters if they exist in the latest but not all commit graphs in the chain.' '
 	test_bloom_filters_used_when_some_filters_are_missing "-- A/B"
+'
+
+BASE_BDAT_OFFSET=2240
+BASE_K_BYTE_OFFSET=$((BASE_BDAT_OFFSET + 10))
+BASE_LEN_BYTE_OFFSET=$((BASE_BDAT_OFFSET + 14))
+
+corrupt_graph() {
+	pos=$1
+	data="${2:-\0}"
+	grepstr=$3
+	orig_size=$(wc -c < .git/objects/info/commit-graph) &&
+	zero_pos=${4:-${orig_size}} &&
+	printf "$data" | dd of=".git/objects/info/commit-graph" bs=1 seek="$pos" conv=notrunc &&
+	dd of=".git/objects/info/commit-graph" bs=1 seek="$zero_pos" if=/dev/null
+}
+
+test_expect_success 'persist filter settings' '
+	test_when_finished rm -rf .git/objects/info/commit-graph* &&
+	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" git commit-graph write --reachable --changed-paths &&
+	grep "{\"hash_version\":1,\"num_hashes\":7,\"bits_per_entry\":10}" trace2.txt &&
+	cp .git/objects/info/commit-graph commit-graph-before &&
+	corrupt_graph $BASE_K_BYTE_OFFSET "\09" &&
+	corrupt_graph $BASE_LEN_BYTE_OFFSET "\0F" &&
+	cp .git/objects/info/commit-graph commit-graph-after &&
+	test_commit c18 A/corrupt &&
+	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" git commit-graph write --reachable --changed-paths &&
+	grep "{\"hash_version\":1,\"num_hashes\":57,\"bits_per_entry\":70}" trace2.txt
 '
 
 test_done
